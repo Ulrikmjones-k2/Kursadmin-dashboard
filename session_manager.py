@@ -177,18 +177,55 @@ class SessionManager:
 
     def clear_session_cookie(self):
         """Clear session cookie."""
+        print(f"🧹 CLEAR SESSION: Starting cookie and session cleanup...")
+
         # Clear from cookie manager
         if self.cookie_name in cookies:
+            print(f"🧹 CLEAR SESSION: Found cookie {self.cookie_name}, deleting...")
             del cookies[self.cookie_name]
-            print(f"✅ Session cookie cleared from cookie manager")
+            # Force save to ensure cookie is removed from browser immediately
+            cookies.save()
+            print(f"✅ Session cookie cleared from cookie manager and browser")
+        else:
+            print(f"🔍 CLEAR SESSION: No cookie found to clear")
+
+        # Also clear cookie directly with JavaScript as backup
+        print(f"🧹 CLEAR SESSION: Also clearing cookie via JavaScript...")
+        import streamlit.components.v1 as components
+        clear_cookie_js = f"""
+        <script>
+            // Clear the specific cookie
+            document.cookie = "kursadmin_{self.cookie_name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; domain=" + window.location.hostname;
+            document.cookie = "kursadmin_{self.cookie_name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/";
+
+            // Clear all cookies with our prefix (just in case)
+            const cookies = document.cookie.split(";");
+            for (let cookie of cookies) {{
+                const eqPos = cookie.indexOf("=");
+                const name = eqPos > -1 ? cookie.substr(0, eqPos).trim() : cookie.trim();
+                if (name.startsWith("kursadmin_")) {{
+                    document.cookie = name + "=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; domain=" + window.location.hostname;
+                    document.cookie = name + "=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/";
+                    console.log("Cleared cookie:", name);
+                }}
+            }}
+
+            console.log("🧹 JavaScript cookie cleanup completed");
+            console.log("Remaining cookies:", document.cookie);
+        </script>
+        """
+        components.html(clear_cookie_js, height=1)
 
         # Clear session state
         keys_to_clear = ['current_session_id', 'authenticated', 'user_info', 'access_token', 'token_expiry', 'auth_timestamp']
+        cleared_keys = []
         for key in keys_to_clear:
             if key in st.session_state:
                 del st.session_state[key]
+                cleared_keys.append(key)
 
-        print(f"✅ Session state cleared")
+        print(f"✅ Session state cleared: {cleared_keys}")
+        print(f"🧹 CLEAR SESSION: Cleanup completed")
 
 # Global session manager instance
 session_manager = None
