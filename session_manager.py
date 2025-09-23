@@ -134,43 +134,44 @@ class SessionManager:
         """Set persistent cookie with session ID."""
         print(f"🍪 SETTING SESSION COOKIE: {session_id[:8]}... via cookie manager")
 
-        # Calculate expiration time (24 hours)
-        expires_at = datetime.now() + timedelta(hours=24)
-
-        # Set the cookie with persistence attributes
+        # Set the cookie using dictionary-like syntax
         cookies[self.cookie_name] = session_id
-        cookies.set_cookie(
-            key=self.cookie_name,
-            value=session_id,
-            expires_at=expires_at,
-            max_age=24 * 3600,  # 24 hours in seconds
-            path="/",
-            secure=False,  # Set to True for HTTPS
-            httponly=False,
-            samesite="Lax"
-        )
+
+        # Save immediately to ensure persistence
+        cookies.save()
 
         st.session_state.current_session_id = session_id
-        print(f"✅ Session cookie set with 24h expiration: {session_id[:8]}...")
+        print(f"✅ Session cookie set: {session_id[:8]}...")
 
     def get_session_cookie(self) -> Optional[str]:
         """Get session ID from cookie."""
         print(f"🔍 GETTING SESSION COOKIE...")
 
-        # Check session state first (fastest)
+        # Check session state first, but validate it
         session_id = st.session_state.get('current_session_id')
         if session_id:
-            print(f"✅ Found session in session state: {session_id[:8]}...")
-            return session_id
+            print(f"🔍 Found session in session state: {session_id[:8]}... - validating...")
+            # Validate this session exists in database
+            if self.validate_session(session_id):
+                print(f"✅ Session state session is valid")
+                return session_id
+            else:
+                print(f"❌ Session state session is invalid - clearing")
+                del st.session_state['current_session_id']
 
         # Read from cookie manager
         cookie_value = cookies.get(self.cookie_name)
         if cookie_value:
             print(f"✅ Found session via cookie manager: {cookie_value[:8]}...")
-            st.session_state.current_session_id = cookie_value
-            return cookie_value
+            # Validate this session exists in database
+            if self.validate_session(cookie_value):
+                st.session_state.current_session_id = cookie_value
+                return cookie_value
+            else:
+                print(f"❌ Cookie session is invalid - clearing")
+                del cookies[self.cookie_name]
 
-        print(f"❌ No session cookie found")
+        print(f"❌ No valid session cookie found")
         return None
 
 
