@@ -1,0 +1,14 @@
+streamlit>=1.28.0
+pandas>=1.5.0
+pyodbc>=4.0.35
+sqlalchemy>=1.4.0
+python-dotenv>=1.0.0
+msal>=1.24.0
+requests>=2.31.0
+cryptography>=41.0.0  # Used for session cookie encryption
+pyjwt>=2.8.0
+# Basic HTTP cookies via JavaScript - no external dependencies needed
+hashlib
+datetime
+json
+uuid                  # For generating session IDs                
