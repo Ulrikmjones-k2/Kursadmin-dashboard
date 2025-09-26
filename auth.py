@@ -1,222 +1,227 @@
 """
-Simple Microsoft Authentication for Streamlit Dashboard
-Session-based with simple cookie persistence
+Simple Azure AD Authentication for Streamlit
 """
 
 import streamlit as st
 import msal
 import os
 import requests
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from streamlit_cookies_manager import EncryptedCookieManager
+from session_manager import get_session_manager
 
 load_dotenv()
 
-# Initialize cookie manager
-cookies = EncryptedCookieManager(
-    prefix="dashboard_",
-    password="simple_dashboard_secret_2024"
-)
+class AzureADAuth:
+    """Simple Azure AD authentication handler."""
 
-if not cookies.ready():
-    st.stop()
+    def __init__(self):
+        self.tenant_id = os.getenv('AZURE_TENANT_ID')
+        self.client_id = os.getenv('AZURE_CLIENT_ID')
+        self.client_secret = os.getenv('AZURE_CLIENT_SECRET')
+        self.authority = os.getenv('AZURE_AUTHORITY')
+        self.redirect_uri = os.getenv('AZURE_REDIRECT_URI')
+        self.scopes = ["User.Read"]
 
-# Azure AD Configuration
-TENANT_ID = os.getenv('AZURE_TENANT_ID')
-CLIENT_ID = os.getenv('AZURE_CLIENT_ID')
-CLIENT_SECRET = os.getenv('AZURE_CLIENT_SECRET')
-AUTHORITY = os.getenv('AZURE_AUTHORITY')
-REDIRECT_URI = os.getenv('AZURE_REDIRECT_URI')
-SCOPES = ["User.Read"]
+        if not all([self.tenant_id, self.client_id, self.client_secret]):
+            raise ValueError("Missing Azure AD configuration")
 
-def get_msal_app():
-    """Create MSAL application."""
-    return msal.ConfidentialClientApplication(
-        client_id=CLIENT_ID,
-        client_credential=CLIENT_SECRET,
-        authority=AUTHORITY
-    )
-
-def get_login_url():
-    """Generate Microsoft login URL."""
-    app = get_msal_app()
-    return app.get_authorization_request_url(
-        scopes=SCOPES,
-        redirect_uri=REDIRECT_URI
-    )
-
-def handle_login_callback():
-    """Process Microsoft's callback with auth code."""
-    auth_code = st.query_params.get('code')
-    if not auth_code:
-        return False
-
-    try:
-        # Exchange code for token
-        app = get_msal_app()
-        result = app.acquire_token_by_authorization_code(
-            auth_code,
-            scopes=SCOPES,
-            redirect_uri=REDIRECT_URI
+    def get_msal_app(self):
+        """Create MSAL application instance."""
+        return msal.ConfidentialClientApplication(
+            client_id=self.client_id,
+            client_credential=self.client_secret,
+            authority=self.authority
         )
 
-        if "access_token" in result:
-            # Get user info from Microsoft Graph
-            headers = {'Authorization': f'Bearer {result["access_token"]}'}
+    def get_auth_url(self):
+        """Generate Azure AD login URL."""
+        app = self.get_msal_app()
+        return app.get_authorization_request_url(
+            scopes=self.scopes,
+            redirect_uri=self.redirect_uri
+        )
+
+    def handle_auth_callback(self):
+        """Handle callback from Azure AD."""
+        code = st.query_params.get('code')
+        if not code:
+            return False
+
+        try:
+            app = self.get_msal_app()
+            result = app.acquire_token_by_authorization_code(
+                code,
+                scopes=self.scopes,
+                redirect_uri=self.redirect_uri
+            )
+
+            if "access_token" in result:
+                user_info = self._get_user_info(result["access_token"])
+                if user_info:
+                    # Store in session state
+                    st.session_state.authenticated = True
+                    st.session_state.user_info = user_info
+                    st.session_state.access_token = result["access_token"]
+                    st.session_state.token_expiry = datetime.now() + timedelta(hours=1)
+                    st.session_state.auth_timestamp = datetime.now()
+
+                    # Create persistent session
+                    session_mgr = get_session_manager()
+                    session_id = session_mgr.create_session(user_info)
+                    if session_id:
+                        session_mgr.set_session_cookie(session_id)
+
+                    # Clear URL parameters
+                    st.query_params.clear()
+                    return True
+
+        except Exception as e:
+            st.error(f"Autentisering feilet: {e}")
+
+        return False
+
+    def _get_user_info(self, access_token):
+        """Get user info from Microsoft Graph."""
+        try:
+            headers = {'Authorization': f'Bearer {access_token}'}
             response = requests.get('https://graph.microsoft.com/v1.0/me', headers=headers)
-
             if response.status_code == 200:
-                user_info = response.json()
+                return response.json()
+        except Exception as e:
+            print(f"Failed to get user info: {e}")
+        return None
 
-                # Store in session state
-                st.session_state.authenticated = True
-                st.session_state.user_info = user_info
-                st.session_state.access_token = result["access_token"]
-
-                # NEW: Also set cookie for persistence
-                set_user_cookie(user_info)
-
-                # Clear URL parameters
-                st.query_params.clear()
-                st.success(f"Welcome, {user_info.get('displayName', 'User')}!")
+    def is_authenticated(self):
+        """Check if user is authenticated."""
+        # Check session state first
+        if st.session_state.get('authenticated'):
+            token_expiry = st.session_state.get('token_expiry')
+            if token_expiry and datetime.now() < token_expiry:
                 return True
 
-    except Exception as e:
-        st.error(f"Login failed: {str(e)}")
+        # Try to restore from persistent session
+        session_mgr = get_session_manager()
+        session_id = session_mgr.get_session_cookie()
+        if session_id:
+            user_info = session_mgr.validate_session(session_id)
+            if user_info:
+                # Restore session state
+                st.session_state.authenticated = True
+                st.session_state.user_info = user_info
+                st.session_state.access_token = "restored_session"
+                st.session_state.token_expiry = datetime.now() + timedelta(hours=24)
+                st.session_state.auth_timestamp = datetime.now()
+                return True
 
-    return False
+        return False
 
-def is_authenticated():
-    """Check if user is logged in this session."""
-    return st.session_state.get('authenticated', False)
+    def logout(self):
+        """Logout user."""
+        # Clear persistent session
+        session_mgr = get_session_manager()
+        session_mgr.clear_session_cookie()
+
+        # Clear additional session state
+        if 'login_cookie_check' in st.session_state:
+            del st.session_state['login_cookie_check']
+
+# Global instance
+azure_auth = AzureADAuth()
+
+# Simple convenience functions
+def check_authentication():
+    """Check if user is authenticated."""
+    # Handle auth callback first
+    if st.query_params.get('code'):
+        azure_auth.handle_auth_callback()
+
+    return azure_auth.is_authenticated()
+
+def show_login_page():
+    """Show login page."""
+    st.title("Pålogging kreves")
+    st.write("Vennligst logg inn for å få tilgang til Kursadministrasjonsdashbordet.")
+
+    # First, try to read existing cookies immediately
+    session_mgr = get_session_manager()
+
+    # Try to get session cookie directly from session manager
+    if 'login_cookie_check' not in st.session_state:
+        print(f"🔍 LOGIN PAGE: Checking for existing session...")
+        session_id = session_mgr.get_session_cookie()
+        if session_id:
+            print(f"🔍 LOGIN PAGE: Found session ID from cookie: {session_id[:8]}...")
+            user_info = session_mgr.validate_session(session_id)
+            if user_info:
+                print(f"✅ LOGIN PAGE: Session valid - restoring authentication for {user_info.get('displayName', 'Unknown')}")
+                # Restore session state
+                st.session_state.authenticated = True
+                st.session_state.user_info = user_info
+                st.session_state.access_token = "restored_session"
+                st.session_state.token_expiry = datetime.now() + timedelta(hours=24)
+                st.session_state.auth_timestamp = datetime.now()
+                st.session_state.current_session_id = session_id
+
+                print(f"🔄 LOGIN PAGE: Authentication restored, refreshing...")
+                st.rerun()
+            else:
+                print(f"❌ LOGIN PAGE: Session invalid - will show login form")
+        else:
+            print(f"❌ LOGIN PAGE: No session cookie found - will show login form")
+
+        st.session_state.login_cookie_check = True
+
+
+
+        auth_url = azure_auth.get_auth_url()
+        html_button = f"""
+        <div style="text-align: center; margin: 20px 0;">
+            <a href="{auth_url}" target="_self" style="
+                display: inline-block;
+                background-color: #0078d4;
+                color: white;
+                padding: 12px 24px;
+                text-decoration: none;
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 16px;
+                border: none;
+                cursor: pointer;
+            ">Logg inn med Microsoft</a>
+        </div>
+        """
+        st.html(html_button)
+
+def show_logout_button():
+    """Show logout button."""
+    if st.button("Logg ut"):
+        azure_auth.logout()
+        st.rerun()
 
 def get_current_user():
     """Get current user info."""
     return st.session_state.get('user_info')
 
-def logout():
-    """Logout user."""
-    # Clear all auth-related session state
-    keys_to_clear = ['authenticated', 'user_info', 'access_token', 'cookie_checked']
-    for key in keys_to_clear:
-        if key in st.session_state:
-            del st.session_state[key]
-
-    # NEW: Also clear cookie
-    clear_user_cookie()
-
-# Simple cookie functions
-def set_user_cookie(user_info):
-    """Set cookie with user info after login."""
-    if cookies.ready():
-        # Store just the user's name and email as simple string
-        user_data = f"{user_info.get('displayName', 'Unknown')}|{user_info.get('mail', 'no-email')}"
-        cookies['user'] = user_data
-        cookies.save()
-        print(f"🍪 SET COOKIE: Cookie name='user', Value='{user_data}'")
-        print(f"🍪 SET COOKIE: Set for user: {user_info.get('displayName', 'Unknown')}")
-        print(f"🍪 SET COOKIE: Location=browser cookie store with prefix 'dashboard_'")
-    else:
-        print("⚠️ SET COOKIE: Cookies not ready - cannot set cookie")
-
-def check_existing_cookie():
-    """Check if user has valid cookie (just report, don't login)."""
-    print(f"🔍 CHECK COOKIE: Starting cookie search...")
-    print(f"🔍 CHECK COOKIE: Looking for cookie name='user' with prefix 'dashboard_'")
-
-    if cookies.ready():
-        print(f"✅ CHECK COOKIE: Cookie manager is ready")
-        user_data = cookies.get('user')
-        print(f"🔍 CHECK COOKIE: Raw cookie value: '{user_data}'")
-
-        if user_data and '|' in user_data:
-            try:
-                # Parse the stored data
-                name, email = user_data.split('|', 1)
-                print(f"✅ CHECK COOKIE: Found valid cookie!")
-                print(f"✅ CHECK COOKIE: Cookie name='user', Full value='{user_data}'")
-                print(f"✅ CHECK COOKIE: Parsed name='{name}', email='{email}'")
-                print(f"✅ CHECK COOKIE: Location=browser cookie store with prefix 'dashboard_'")
-                st.info(f"🍪 Found existing cookie for: {name}")
-                return True
-            except ValueError:
-                print("❌ CHECK COOKIE: Invalid cookie format - clearing")
-                del cookies['user']
-                cookies.save()
-        else:
-            print("❌ CHECK COOKIE: No valid cookie found (empty or invalid format)")
-    else:
-        print("⚠️ CHECK COOKIE: Cookies not ready - cannot check cookie")
-    return False
-
-def clear_user_cookie():
-    """Clear user cookie on logout."""
-    print(f"🧹 CLEAR COOKIE: Starting cookie cleanup...")
-    if cookies.ready() and 'user' in cookies:
-        old_value = cookies.get('user')
-        del cookies['user']
-        cookies.save()
-        print(f"🧹 CLEAR COOKIE: Deleted cookie name='user' with value='{old_value}'")
-        print(f"🧹 CLEAR COOKIE: Location=browser cookie store with prefix 'dashboard_'")
-        print("✅ CLEAR COOKIE: Cookie successfully cleared")
-    else:
-        print("❌ CLEAR COOKIE: No cookie to clear or cookies not ready")
-
-def show_login_page():
-    """Display login page."""
-    st.title("🔐 Login Required")
-    st.write("Please sign in with your Microsoft account to access the Course Management Dashboard.")
-
-    # NEW: Check for existing cookie first (just report, don't login)
-    if 'cookie_checked' not in st.session_state:
-        check_existing_cookie()  # Just check and display info
-        st.session_state.cookie_checked = True
-
-    # Handle callback if present
-    if st.query_params.get('code'):
-        if handle_login_callback():
-            st.rerun()
-
-    # Show login button
-    login_url = get_login_url()
-
-    st.markdown(f"""
-    <div style="text-align: center; margin: 40px 0;">
-        <a href="{login_url}" target="_self" style="
-            display: inline-block;
-            background: linear-gradient(90deg, #0078d4 0%, #106ebe 100%);
-            color: white;
-            padding: 16px 32px;
-            text-decoration: none;
-            border-radius: 8px;
-            font-weight: 600;
-            font-size: 16px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            transition: transform 0.2s ease;
-        " onmouseover="this.style.transform='translateY(-2px)'"
-           onmouseout="this.style.transform='translateY(0)'">
-            🚀 Sign in with Microsoft
-        </a>
-    </div>
-    """, unsafe_allow_html=True)
-
-def show_logout_button():
-    """Display logout button."""
-    with st.sidebar:
-        if st.button("🚪 Logout", type="secondary"):
-            logout()
-            st.rerun()
-
-# Main authentication check function
-def check_authentication():
-    """Main function to check authentication status."""
-    # Handle callback first
-    if st.query_params.get('code') and not is_authenticated():
-        handle_login_callback()
-
-    return is_authenticated()
-
-# Placeholder functions for compatibility
 def cleanup_expired_sessions():
-    """Placeholder - no session cleanup needed."""
-    pass
+    """Cleanup expired sessions."""
+    try:
+        from sqlalchemy import text
+        import app
+        engine = app.get_engine()
+        with engine.connect() as conn:
+            # Mark expired sessions as inactive
+            result = conn.execute(text("""
+                UPDATE user_sessions
+                SET is_active = 0
+                WHERE expires_at <= GETDATE() AND is_active = 1
+            """))
+            conn.commit()
+
+            # Log cleanup results
+            rows_affected = result.rowcount
+            if rows_affected > 0:
+                print(f"🧹 Cleaned up {rows_affected} expired sessions")
+
+    except Exception as e:
+        print(f"⚠️ Session cleanup failed: {e}")

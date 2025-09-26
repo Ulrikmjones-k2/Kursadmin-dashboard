@@ -37,7 +37,7 @@ def fetch_data(query):
         df = pd.read_sql(query, engine)
         return df
     except Exception as e:
-        st.error(f"Database error: {str(e)}")
+        st.error(f"Database-feil: {str(e)}")
         return pd.DataFrame()
 
 
@@ -111,6 +111,35 @@ def get_course_by_id(course_id):
     """
     return fetch_data(query)
 
+def get_course_instructors(course_id):
+    """Get instructors for a specific course by frontcore_id"""
+    query = """
+    SELECT
+        i.full_name,
+        i.email,
+        i.phone_number,
+        i.notes AS instructor_notes,
+        ic.new_instructor,
+        ic.contract_sent,
+        ic.contract_signed
+    FROM instructors i
+    INNER JOIN instructors_coursedates ic ON i.id = ic.instructor_id
+    INNER JOIN coursedates cd ON ic.coursedate_id = cd.id
+    WHERE cd.frontcore_id = ?
+    ORDER BY i.full_name
+    """
+    try:
+        engine = get_engine()
+        with engine.connect() as conn:
+            df = pd.read_sql(query, conn, params=(course_id,))
+        return df
+    except Exception as e:
+        print(f"Error fetching course instructors for course {course_id}: {e}")
+        # Check if the error is due to missing tables
+        if "Invalid object name 'instructors'" in str(e) or "Invalid object name 'instructors_coursedates'" in str(e):
+            print("Instructor tables not found - they may not be created yet")
+        return pd.DataFrame()
+
 # =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================
@@ -137,7 +166,7 @@ def initialize_session_state():
     if 'should_redirect' not in st.session_state:
         st.session_state.should_redirect = False
     if 'current_page' not in st.session_state:
-        st.session_state.current_page = "Courses Datasheet"
+        st.session_state.current_page = "Kursoversikt"
 
     # Audit logging tracking to prevent duplicate page view logs
     if 'last_logged_page' not in st.session_state:
@@ -181,100 +210,6 @@ def smart_log_page_view(page_name: str, course_id: str = None):
         print(f"🔄 SMART AUDIT: Skipped duplicate log - {page_name}" +
               (f" (Course: {course_id})" if course_id else ""))
 
-def initialize_course_edit_state(course_data):
-    """Initialize session state for course editing"""
-    if 'edit_billed' not in st.session_state:
-        st.session_state.edit_billed = bool(course_data.get('Fakturert', False))
-    if 'edit_responsible' not in st.session_state:
-        st.session_state.edit_responsible = course_data.get('Ansvarlig', '') or ''
-    if 'edit_who_billed' not in st.session_state:
-        st.session_state.edit_who_billed = course_data.get('Hvem fakturerte', '') or ''
-    if 'edit_notes' not in st.session_state:
-        st.session_state.edit_notes = course_data.get('Notater', '') or ''
-
-def save_course_changes(original_course_data):
-    """
-    Save course changes to database with comprehensive audit logging.
-
-    Learning Note: This function demonstrates how to:
-    1. Collect current form values
-    2. Compare with original values
-    3. Update database
-    4. Log changes for GDPR compliance
-
-    Args:
-        original_course_data: The original course data before changes
-    """
-
-    try:
-        # Get current values from form widgets
-        current_values = {
-            'billed': st.session_state.get('billed_checkbox', False),
-            'responsible': st.session_state.get('responsible_input', ''),
-            'who_billed': st.session_state.get('who_billed_input', ''),
-            'notes': st.session_state.get('notes_textarea', '')
-        }
-
-        # Get original values for comparison
-        original_values = {
-            'billed': bool(original_course_data.get('Fakturert', False)),
-            'responsible': original_course_data.get('Ansvarlig', '') or '',
-            'who_billed': original_course_data.get('Hvem fakturerte', '') or '',
-            'notes': original_course_data.get('Notater', '') or ''
-        }
-
-        # Check if any changes were made
-        changes_made = any(current_values[key] != original_values[key] for key in current_values.keys())
-
-        if not changes_made:
-            st.info("No changes detected.")
-            return
-
-        # Build SQL update statement
-        update_sql = """
-        UPDATE coursedates
-        SET billed = ?, responsible = ?, who_billed = ?, notes = ?
-        WHERE frontcore_id = ?
-        """
-
-        course_id = original_course_data['KursdatoID']
-
-        # Execute update
-        engine = get_engine()
-        with engine.connect() as conn:
-            conn.execute(update_sql, (
-                current_values['billed'],
-                current_values['responsible'],
-                current_values['who_billed'],
-                current_values['notes'],
-                course_id
-            ))
-            conn.commit()
-
-        # Log the changes for GDPR compliance
-        log_course_update(course_id, original_values, current_values)
-
-        # Update session state with new values
-        st.session_state.edit_billed = current_values['billed']
-        st.session_state.edit_responsible = current_values['responsible']
-        st.session_state.edit_who_billed = current_values['who_billed']
-        st.session_state.edit_notes = current_values['notes']
-
-        # Show success message
-        st.success("✅ Changes saved successfully!")
-
-        # Get current user for personalized message
-        user = get_current_user()
-        if user:
-            st.info(f"Changes saved by {user['display_name']} at {pd.Timestamp.now().strftime('%H:%M:%S')}")
-
-    except Exception as e:
-        st.error(f"❌ Error saving changes: {str(e)}")
-
-        # Log the error for troubleshooting
-        user = get_current_user()
-        if user:
-            print(f"Save error for user {user['email']}: {str(e)}")
 
 def add_hyperlink_css():
     """Add CSS styling for hyperlink appearance in dataframes"""
@@ -291,6 +226,55 @@ def add_hyperlink_css():
     </style>
     """, unsafe_allow_html=True)
 
+def add_dynamic_height_css():
+    """Add CSS for dynamic dataframe height calculation"""
+    st.markdown("""
+    <style>
+    .stDataFrame > div {
+        height: calc(100vh - 400px) !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+def add_compact_css():
+    """Add CSS for compact layout to minimize scrolling"""
+    st.markdown("""
+    <style>
+    /* Reduce general spacing */
+    .block-container {
+        padding-top: 2rem !important;
+        padding-bottom: 1rem !important;
+    }
+
+    /* Compact dataframes */
+    .stDataFrame {
+        font-size: 0.9rem !important;
+    }
+
+    /* Reduce spacing between elements */
+    .element-container {
+        margin-bottom: 0.5rem !important;
+    }
+
+    /* Compact headers */
+    h1, h2, h3 {
+        margin-top: 0.5rem !important;
+        margin-bottom: 0.5rem !important;
+    }
+
+    /* Reduce expander spacing */
+    .streamlit-expander {
+        margin-bottom: 0.5rem !important;
+    }
+
+    /* Compact columns */
+    .stColumn > div {
+        padding-left: 0.5rem !important;
+        padding-right: 0.5rem !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
 # =============================================================================
 # PAGE COMPONENTS
 # =============================================================================
@@ -298,12 +282,12 @@ def add_hyperlink_css():
 
 def show_courses_datasheet_page():
     """Display the courses datasheet page"""
-    st.header("Courses Datasheet")
+    st.header("Kursoversikt")
 
     # Search functionality
     search_term = st.text_input(
-        "🔍 Search courses",
-        placeholder="Search by title, location, or status...",
+        "Søk i kurs",
+        placeholder="Søk etter tittel, sted eller status...",
         key="search_input_simple"
     )
 
@@ -323,13 +307,14 @@ def show_courses_datasheet_page():
         # Initialize session state and add styling
         initialize_session_state()
         add_hyperlink_css()
+        add_dynamic_height_css()
 
-        st.write(f"Found {len(display_df)} courses")
+        st.write(f"Fant {len(display_df)} kurs")
 
-        # Display datasheet with selection capability
+        # Display datasheet with selection capability (CSS handles dynamic height)
         event = st.dataframe(
             display_df,
-            height=400,
+            height=400,  # Base height, CSS will override with dynamic calculation
             width='stretch',
             on_select="rerun",
             selection_mode="single-row"
@@ -343,45 +328,12 @@ def show_courses_datasheet_page():
             st.session_state.selected_course_id = selected_course['KursdatoID']
             st.session_state.should_redirect = True
             st.rerun()
-
-        # Alternative course selection method
-        st.subheader("💡 How to View Course Details")
-        st.info("Click on any row in the table above to view detailed course information. You'll automatically be taken to the Course Details page.")
-
-        # Optional: Keep selectbox as fallback
-        with st.expander("Alternative: Use dropdown selection"):
-            if len(display_df) > 0:
-                # Create course options for selection
-                course_options = []
-                for idx, row in display_df.iterrows():
-                    course_options.append(f"{row['Tittel']} ({row['KursdatoID']})")
-
-                selected_option = st.selectbox(
-                    "Choose a course to view details:",
-                    course_options,
-                    key="course_selector",
-                    index=None,
-                    placeholder="Select a course..."
-                )
-
-                if selected_option:
-                    # Find the selected course
-                    selected_idx = course_options.index(selected_option)
-                    selected_course_id = display_df.iloc[selected_idx]['KursdatoID']
-
-                    # Store selected course and navigate to detail page
-                    st.session_state.selected_course_id = selected_course_id
-                    st.info(f"Selected: {selected_option}. Navigate to 'Course Details' page to view full information.")
-            else:
-                st.info("No courses available for selection.")
-
-        st.write(f"Total courses: {len(filtered_df)} / {len(courses_df)}")
     else:
-        st.warning("No courses found or database connection issue")
+        st.warning("Ingen kurs funnet eller problem med databaseforbindelse")
 
 def show_course_details_page():
     """Display the course details page"""
-    st.header("Course Details")
+    st.header("Kursdetaljer")
 
     if 'selected_course_id' in st.session_state and st.session_state.selected_course_id:
         course_df = get_course_by_id(st.session_state.selected_course_id)
@@ -389,89 +341,76 @@ def show_course_details_page():
         if not course_df.empty:
             course_data = course_df.iloc[0]
 
-            # Initialize editing state
-            initialize_course_edit_state(course_data)
+            # Apply compact CSS for minimal scrolling
+            add_compact_css()
 
             # Back button
-            if st.button("← Back to Courses Datasheet"):
+            if st.button("Tilbake til kursoversikt"):
                 st.session_state.selected_course_id = None
                 st.session_state.should_redirect = False
-                st.session_state.current_page = "Courses Datasheet"
+                st.session_state.current_page = "Kursoversikt"
 
                 # Reset audit logging tracking to ensure back navigation gets logged
                 st.session_state.last_logged_page = None
                 st.session_state.last_logged_course_id = None
-
-                # Clear editing state
-                for key in ['edit_billed', 'edit_responsible', 'edit_who_billed', 'edit_notes']:
-                    if key in st.session_state:
-                        del st.session_state[key]
                 st.rerun()
 
             st.subheader(f"{course_data['Tittel']}")
 
-            # Course Information Section (Read-only)
-            st.markdown("### 📋 Course Information")
-            col1, col2 = st.columns(2)
+            # Compact course information in 3 columns
+            col1, col2, col3 = st.columns(3)
 
             with col1:
-                st.write(f"**KursdatoID:** {course_data['KursdatoID']}")
-                st.write(f"**Tittel:** {course_data['Tittel']}")
+                st.write(f"**ID:** {course_data['KursdatoID']}")
                 st.write(f"**Sted:** {course_data['Sted']}")
-                st.write(f"**Startdato:** {course_data['Startdato']}")
-
-            with col2:
-                st.write(f"**Sluttdato:** {course_data['Sluttdato']}")
                 st.write(f"**Status:** {course_data['Status']}")
-                st.write(f"**Tid:** {course_data['Tid']}")
-                st.write(f"**Avdelingsnummer:** {course_data['Avdelingsnummer']}")
-
-            st.divider()
-
-            # Administrative Details Section (Editable)
-            st.markdown("### ✏️ Administrative Details")
-
-            admin_col1, admin_col2 = st.columns(2)
-
-            with admin_col1:
-                st.text_input(
-                    "Ansvarlig",
-                    value=st.session_state.edit_responsible,
-                    key="responsible_input"
-                )
-
-                st.checkbox(
-                    "Fakturert",
-                    value=st.session_state.edit_billed,
-                    key="billed_checkbox"
-                )
-
-            with admin_col2:
-                st.text_input(
-                    "Hvem fakturerte",
-                    value=st.session_state.edit_who_billed,
-                    key="who_billed_input"
-                )
-
-            # Notes section (full width)
-            st.text_area(
-                "Notater",
-                value=st.session_state.edit_notes,
-                height=100,
-                key="notes_textarea"
-            )
-
-            # Save button with audit logging
-            st.markdown("---")
-            col1, col2, col3 = st.columns([1, 1, 1])
+                st.write(f"**Ansvarlig:** {course_data['Ansvarlig'] or 'Ikke oppgitt'}")
 
             with col2:
-                if st.button("💾 Save Changes", type="primary"):
-                    save_course_changes(course_data)
+                st.write(f"**Start:** {course_data['Startdato']}")
+                st.write(f"**Slutt:** {course_data['Sluttdato']}")
+                st.write(f"**Tid:** {course_data['Tid']}")
+                fakturert_text = "Ja" if course_data['Fakturert'] else "Nei"
+                st.write(f"**Fakturert:** {fakturert_text}")
+
+            with col3:
+                st.write(f"**Avdeling:** {course_data['Avdelingsnummer']}")
+                st.write(f"**Fakturert av:** {course_data['Hvem fakturerte'] or 'Ikke oppgitt'}")
+                if course_data['Notater']:
+                    with st.expander("Notater", expanded=False):
+                        st.write(course_data['Notater'])
+                else:
+                    st.write("**Notater:** *Ingen*")
+
+            # Compact Instructors Section
+            st.markdown("### Instruktører")
+
+            # Get instructors for this course
+            instructors_df = get_course_instructors(st.session_state.selected_course_id)
+
+            if not instructors_df.empty:
+                # Create a complete display table with all details
+                display_data = []
+                for idx, instructor in instructors_df.iterrows():
+                    display_data.append({
+                        'Navn': instructor['full_name'],
+                        'E-post': instructor['email'] if pd.notna(instructor['email']) and instructor['email'] else 'Ikke oppgitt',
+                        'Telefon': instructor['phone_number'] if pd.notna(instructor['phone_number']) and instructor['phone_number'] else 'Ikke oppgitt',
+                        'Ny instruktør': 'Ja' if instructor['new_instructor'] else 'Nei',
+                        'Kontrakt sendt': 'Ja' if instructor['contract_sent'] else 'Nei',
+                        'Kontrakt signert': 'Ja' if instructor['contract_signed'] else 'Nei',
+                        'Notater': instructor['instructor_notes'] if pd.notna(instructor['instructor_notes']) and instructor['instructor_notes'] else 'Ingen notater'
+                    })
+
+                # Display as complete table
+                complete_df = pd.DataFrame(display_data)
+                st.dataframe(complete_df, width='stretch', hide_index=True)
+            else:
+                st.info("Ingen instruktører registrert for dette kurset.")
         else:
-            st.warning("Course not found")
+            st.warning("Kurs ikke funnet")
     else:
-        st.info("No course selected. Please go to the Courses Datasheet and click on a course title or ID.")
+        st.info("Ingen kurs valgt. Gå til kursoversikten og klikk på en kurstittel eller ID.")
 
 # =============================================================================
 # MAIN APPLICATION
@@ -487,7 +426,7 @@ def main():
 
     # Set page configuration
     st.set_page_config(
-        page_title="Course Management Dashboard",
+        page_title="Kursadministrasjonsdashbord",
         page_icon="🎓",
         layout="wide",
         initial_sidebar_state="expanded"
@@ -519,23 +458,32 @@ def show_authenticated_dashboard():
     initialize_session_state()
 
     # Show user info and logout button in sidebar
-    show_logout_button()
+    with st.sidebar:
+        # Display current user name
+        user = get_current_user()
+        if user and 'displayName' in user:
+            st.write(f"Hei, **{user['displayName']}**")
+        elif user and 'display_name' in user:
+            st.write(f"Hei, **{user['display_name']}**")
+        else:
+            st.write("Hei, **Ukjent bruker**")
 
-    st.sidebar.markdown("---")  # Add separator
-    st.sidebar.title("Navigation")
+        show_logout_button()
+        st.markdown("---")  # Add separator
+        st.title("Navigasjon")
 
     # Check for automatic navigation to details page
     if st.session_state.get('should_redirect', False):
-        st.session_state.current_page = "Course Details"
+        st.session_state.current_page = "Kursdetaljer"
         st.session_state.should_redirect = False  # Reset flag after redirect
 
     # Get current page index for selectbox
-    page_options = ["Courses Datasheet", "Course Details"]
+    page_options = ["Kursoversikt", "Kursdetaljer"]
     current_index = page_options.index(st.session_state.current_page)
 
     # Navigation selectbox with proper default
     page = st.sidebar.selectbox(
-        "Select View",
+        "Velg visning",
         page_options,
         index=current_index
     )
@@ -545,12 +493,12 @@ def show_authenticated_dashboard():
         st.session_state.current_page = page
 
     # Route to appropriate page with smart audit logging
-    if page == "Courses Datasheet":
-        smart_log_page_view("Courses Datasheet")  # Only logs actual navigation
+    if page == "Kursoversikt":
+        smart_log_page_view("Kursoversikt")  # Only logs actual navigation
         show_courses_datasheet_page()
-    elif page == "Course Details":
+    elif page == "Kursdetaljer":
         course_id = st.session_state.get('selected_course_id')
-        smart_log_page_view("Course Details", course_id)  # Only logs actual navigation
+        smart_log_page_view("Kursdetaljer", course_id)  # Only logs actual navigation
         show_course_details_page()
 
 # Run the application
